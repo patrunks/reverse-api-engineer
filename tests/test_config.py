@@ -74,6 +74,23 @@ class TestConfigMigration:
         cm = ConfigManager(config_path)
         assert cm.get("agent_provider") == "auto"
 
+    def test_saved_unpinned_packages_fall_back_to_pins(self, config_path):
+        """Floating specifiers persisted by older releases are replaced by the pinned defaults."""
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"opencode_npx_package": "opencode-ai@latest", "agent_browser_npx_package": "agent-browser@0"})
+        )
+        cm = ConfigManager(config_path)
+        assert cm.get("opencode_npx_package") == DEFAULT_CONFIG["opencode_npx_package"]
+        assert cm.get("agent_browser_npx_package") == DEFAULT_CONFIG["agent_browser_npx_package"]
+
+    def test_user_chosen_package_pin_is_kept(self, config_path):
+        """An explicit, non-legacy specifier is left untouched."""
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps({"opencode_npx_package": "opencode-ai@1.19.3"}))
+        cm = ConfigManager(config_path)
+        assert cm.get("opencode_npx_package") == "opencode-ai@1.19.3"
+
 
 class TestConfigManagerOperations:
     """Test get/set/update/save operations."""
@@ -153,6 +170,10 @@ class TestDefaultConfig:
             "opencode_auto_start",
             "opencode_base_url",
             "opencode_npx_package",
+            "playwright_mcp_npx_package",
+            "chrome_mcp_npx_package",
+            "chrome_mcp_auto_connect",
+            "tool_approval",
             "ollama_auto_start",
             "ollama_base_url",
             "output_dir",
@@ -174,6 +195,11 @@ class TestDefaultConfig:
         assert DEFAULT_CONFIG["opencode_provider"] == "opencode"
         assert DEFAULT_CONFIG["opencode_model"] == "big-pickle"
         assert DEFAULT_CONFIG["opencode_auto_start"] is True
-        assert DEFAULT_CONFIG["opencode_npx_package"] == "opencode-ai@latest"
+        assert DEFAULT_CONFIG["opencode_npx_package"] == "opencode-ai@1.18.31"
+        assert DEFAULT_CONFIG["agent_browser_npx_package"] == "agent-browser@0.38.2"
+        assert DEFAULT_CONFIG["playwright_mcp_npx_package"] == "rae-playwright-mcp@0.0.8"
+        assert DEFAULT_CONFIG["chrome_mcp_npx_package"] == "chrome-devtools-mcp@1.10.1"
+        assert DEFAULT_CONFIG["chrome_mcp_auto_connect"] is False
+        assert DEFAULT_CONFIG["tool_approval"] == "ask"
         assert DEFAULT_CONFIG["ollama_auto_start"] is True
         assert DEFAULT_CONFIG["ollama_base_url"] == "http://127.0.0.1:11434"

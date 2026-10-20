@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from .messages import MessageStore
 from .opencode_ui import OpenCodeUI
 from .session import SessionManager
 from .sync import FileSyncWatcher, get_available_directory
+from .tool_approval import review_tool_call
 from .tui import THEME_PRIMARY, THEME_SECONDARY, ClaudeUI
 from .utils import (
     OUTPUT_LANGUAGE_EXTENSIONS,
@@ -123,6 +125,24 @@ class BaseEngineer(ABC):
         sink = self._json_event_sink
         if sink:
             sink(event)
+
+    @property
+    def tool_workspace(self) -> Path:
+        """Run output root (scripts, docs, HAR, messages): the agent's cwd and its free write area."""
+        return self.scripts_dir.parent.parent
+
+    async def _review_tool_call(self, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+        """Return None if the agent may run this tool call, else the denial message to send back."""
+        denial = await review_tool_call(
+            tool_name,
+            tool_input,
+            workspace=self.tool_workspace,
+            interactive=self.interactive,
+            console=self.ui.console,
+        )
+        if denial is not None:
+            self._emit_json_event({"event": "tool_denied", "tool": tool_name, "message": denial})
+        return denial
 
     @staticmethod
     def _is_ask_user_tool_name(tool_name: str) -> bool:

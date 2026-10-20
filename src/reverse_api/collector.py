@@ -1,6 +1,8 @@
 import csv
 import json
 import logging
+import sys
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,8 +11,11 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -18,6 +23,7 @@ from claude_agent_sdk import (
 from .collector_ui import CollectorUI
 from .messages import MessageStore
 from .pricing import calculate_cost
+from .tool_approval import ClaudeToolGate, review_tool_call
 from .utils import build_sdk_env, generate_folder_name, get_collected_dir
 
 # Suppress claude_agent_sdk logs
@@ -56,6 +62,7 @@ class Collector:
         self.ui = CollectorUI()
         self.message_store = MessageStore(run_id, output_dir)
 
+        self._tool_gate = ClaudeToolGate(self._review_tool_call)
         self._folder_name: str | None = None
         self._collected_dir: Path | None = None
         self.usage_metadata: dict[str, Any] = {}
@@ -98,18 +105,37 @@ class Collector:
         )
         return system_prompt, user_message
 
+    async def _review_tool_call(self, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+        """Allow file access inside the collection folder; ask the operator before anything else risky."""
+        assert self._collected_dir is not None
+        return await review_tool_call(
+            tool_name,
+            tool_input,
+            workspace=self._collected_dir,
+            interactive=sys.stdin.isatty(),
+            console=self.ui.console,
+        )
+
+    async def _handle_tool_permission(
+        self, tool_name: str, input_data: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        denial = await self._tool_gate.permission(tool_name, input_data)
+        if denial is not None:
+            return PermissionResultDeny(message=denial)
+        return PermissionResultAllow(updated_input=input_data)
+
     async def _agent_loop(self) -> dict[str, Any] | None:
         """Run Claude Agent SDK loop."""
         options = ClaudeAgentOptions(
             system_prompt=self._system_prompt,
-            permission_mode="bypassPermissions",
+            # Shell and file tools stay off allowed_tools: the hook reviews them, can_use_tool backs it up.
+            permission_mode="default",
             allowed_tools=[
-                "Read",
-                "Write",
-                "Bash",
                 "WebFetch",
                 "WebSearch",
             ],
+            can_use_tool=self._handle_tool_permission,
+            hooks=self._tool_gate.hooks(),
             cwd=str(self._collected_dir),
             model=self.model,
             env=build_sdk_env(),

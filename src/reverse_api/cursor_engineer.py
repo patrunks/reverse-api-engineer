@@ -14,7 +14,9 @@ from typing import Any
 
 from .agent_browser import ensure_agent_browser_runtime, print_agent_browser_setup_notices
 from .base_engineer import BaseEngineer
+from .browser_mcp import chrome_mcp_args, playwright_mcp_args
 from .runtime_commands import resolve_windows_command
+from .tool_approval import approval_mode
 from .tui import ClaudeUI
 
 _BRIDGE_DIR = Path(__file__).resolve().parent / "cursor_bridge"
@@ -407,9 +409,19 @@ class CursorEngineer(BaseEngineer):
                 return {"error": err_t or f"cursor bridge exited with code {code}"}
         return ret
 
+    def _warn_no_tool_approval(self) -> None:
+        """The Cursor SDK has no per-call permission hook, so tool_approval cannot apply here."""
+        if approval_mode() != "ask":
+            return
+        self.ui.console.print(
+            "  [yellow]![/yellow] [dim]The Cursor SDK offers no per-command approval: this agent's shell commands and "
+            "file writes run without confirmation. Use the Claude, Copilot or OpenCode SDK for reviewed runs.[/dim]"
+        )
+
     async def analyze_and_generate(self) -> dict[str, Any] | None:
         self.ui.header(self.run_id, self.prompt, self.cursor_model, self.sdk, mode="engineer")
         self.ui.start_analysis()
+        self._warn_no_tool_approval()
 
         dep_err = _ensure_cursor_bridge_deps()
         if dep_err:
@@ -511,32 +523,18 @@ class CursorAutoEngineer(CursorEngineer):
         if self.agent_provider == "agent-browser":
             return {}
         if self.agent_provider == "chrome-mcp":
-            args = ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
-            if self.headless:
-                args.append("--headless")
-            else:
-                args.append("--autoConnect")
             return {
                 "chrome-devtools": {
                     "type": "stdio",
                     "command": "npx",
-                    "args": args,
+                    "args": ["-y", *chrome_mcp_args(self.headless)],
                 },
             }
-        playwright_args = [
-            "-y",
-            "rae-playwright-mcp@latest",
-            "run-mcp-server",
-            "--run-id",
-            self.mcp_run_id,
-        ]
-        if self.headless:
-            playwright_args.append("--headless")
         return {
             "playwright": {
                 "type": "stdio",
                 "command": "npx",
-                "args": playwright_args,
+                "args": ["-y", *playwright_mcp_args(self.mcp_run_id, self.headless)],
             },
         }
 
@@ -545,6 +543,7 @@ class CursorAutoEngineer(CursorEngineer):
 
         self.ui.header(self.run_id, self.prompt, self.cursor_model, self.sdk, mode="agent")
         self.ui.start_analysis()
+        self._warn_no_tool_approval()
 
         dep_err = _ensure_cursor_bridge_deps()
         if dep_err:

@@ -379,11 +379,47 @@ class TestHandleToolPermission:
                 )
 
     @pytest.mark.asyncio
-    async def test_non_ask_user_tool_auto_approves(self, tmp_path):
-        """Non-AskUserQuestion tools are auto-approved."""
+    async def test_write_inside_run_folder_is_approved(self, tmp_path):
+        """Writes inside the run output folder run without asking."""
         eng = self._make_engineer(tmp_path)
-        result = await eng._handle_tool_permission("Write", {"file_path": "/test.py"}, None)
-        assert result.updated_input == {"file_path": "/test.py"}
+        target = str(eng.tool_workspace / "scripts" / "test123" / "api_client.py")
+        result = await eng._handle_tool_permission("Write", {"file_path": target}, None)
+        assert result.behavior == "allow"
+        assert result.updated_input == {"file_path": target}
+
+    @pytest.mark.asyncio
+    async def test_write_outside_run_folder_asks_operator(self, tmp_path, monkeypatch):
+        """Writes elsewhere need the operator's consent."""
+        monkeypatch.setenv("RAE_TOOL_APPROVAL", "ask")
+        eng = self._make_engineer(tmp_path)
+        outside = str(eng.tool_workspace.parent / "elsewhere.py")
+        confirm = MagicMock()
+        confirm.ask_async = AsyncMock(return_value=False)
+        with patch("reverse_api.tool_approval.questionary.confirm", return_value=confirm):
+            result = await eng._handle_tool_permission("Write", {"file_path": outside}, None)
+        assert result.behavior == "deny"
+        confirm.ask_async.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shell_command_denied_when_non_interactive(self, tmp_path, monkeypatch):
+        """Without an operator to ask, shell commands are denied and reported."""
+        monkeypatch.setenv("RAE_TOOL_APPROVAL", "ask")
+        eng = self._make_engineer(tmp_path)
+        eng.interactive = False
+        events = []
+        eng._json_event_sink = events.append
+        result = await eng._handle_tool_permission("Bash", {"command": "python api_client.py"}, None)
+        assert result.behavior == "deny"
+        assert events == [{"event": "tool_denied", "tool": "Bash", "message": result.message}]
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_restores_upstream_behavior(self, tmp_path, monkeypatch):
+        """tool_approval=auto approves everything, as upstream did."""
+        monkeypatch.setenv("RAE_TOOL_APPROVAL", "auto")
+        eng = self._make_engineer(tmp_path)
+        eng.interactive = False
+        result = await eng._handle_tool_permission("Bash", {"command": "rm -rf /tmp/x"}, None)
+        assert result.behavior == "allow"
 
     @pytest.mark.asyncio
     async def test_ask_user_question_delegates(self, tmp_path):

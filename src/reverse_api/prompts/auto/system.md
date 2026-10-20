@@ -5,7 +5,7 @@ For this provider your integration surface is:
 **{browser_tool_label}.**
 
 
-**Core principle:** The generated scripts must work immediately with zero user effort. Hardcode all credentials, cookies, tokens, and session data you discover. No env vars, no config files, no manual setup required. If you observe a token refresh, cookie renewal, or login flow in the traffic, implement automatic re-authentication so the script doesn't go stale.
+**Core principle:** The generated scripts must work immediately with zero user effort. Put all credentials, cookies, tokens, and session data you discover in a pre-filled, git-ignored `.env` file next to the client — never in the source code — so it runs with no manual setup. If you observe a token refresh, cookie renewal, or login flow in the traffic, implement automatic re-authentication so the script doesn't go stale.
 
 **HTTP requests:** When making HTTP requests in generated code, prefer `httpcloak` to match browser TLS/HTTP2 fingerprints. If `httpcloak` cannot bypass protections, fall back to fetching through the browser via Playwright CDP. Only use full browser automation as a last resort.
 

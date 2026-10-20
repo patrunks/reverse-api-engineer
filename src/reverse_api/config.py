@@ -10,7 +10,14 @@ DEFAULT_OPENCODE_MODEL = "big-pickle"
 DEFAULT_CONFIG = {
     "agent_provider": "auto",  # "auto" | "chrome-mcp" | "agent-browser"
     "agent_browser_notes": "",  # extra instructions merged into agent-browser prompt / RAE_AGENT_BROWSER_NOTES env
-    "agent_browser_npx_package": "agent-browser@0",
+    "agent_browser_npx_package": "agent-browser@0.38.2",
+    # Exact npm pins for the browser MCP servers; npx would otherwise run whatever was published last.
+    "playwright_mcp_npx_package": "rae-playwright-mcp@0.0.8",
+    "chrome_mcp_npx_package": "chrome-devtools-mcp@1.10.1",
+    # True lets chrome-mcp attach to your own signed-in Chrome; False launches a throwaway profile.
+    "chrome_mcp_auto_connect": False,
+    # "ask": confirm shell commands and writes outside the run folder; "auto": approve everything (upstream behavior).
+    "tool_approval": "ask",
     "claude_code_model": "claude-sonnet-4-6",
     "collector_model": "claude-sonnet-4-6",  # Model for collector mode
     "cursor_model": "composer-2.5",  # Model id for Cursor SDK (see Cursor.models.list())
@@ -24,13 +31,18 @@ DEFAULT_CONFIG = {
     "opencode_provider": DEFAULT_OPENCODE_PROVIDER,
     "opencode_auto_start": True,
     "opencode_base_url": "http://127.0.0.1:4096",
-    "opencode_npx_package": "opencode-ai@latest",
+    "opencode_npx_package": "opencode-ai@1.18.31",
     "ollama_auto_start": True,
     "ollama_base_url": "http://127.0.0.1:11434",
     "output_dir": None,  # None means use ~/.reverse-api/runs
     "output_language": "python",  # "python", "javascript", "typescript", "go", "java", "csharp", "php", "ruby", "c", or "powershell"
     "real_time_sync": True,  # Enable real-time file sync during engineering
     "sdk": "claude",  # "claude", "opencode", "copilot", or "cursor"
+}
+
+UNPINNED_LEGACY_PACKAGES = {
+    "opencode_npx_package": "opencode-ai@latest",
+    "agent_browser_npx_package": "agent-browser@0",
 }
 
 
@@ -57,6 +69,12 @@ class ConfigManager:
                     # Reset removed agent providers to default
                     if user_config.get("agent_provider") in ("browser-use", "stagehand"):
                         user_config["agent_provider"] = "auto"
+
+                    # save() persists every default, so configs written before the pins
+                    # would keep the old floating specifiers forever
+                    for key, unpinned in UNPINNED_LEGACY_PACKAGES.items():
+                        if user_config.get(key) == unpinned:
+                            del user_config[key]
 
                     # Only keep valid keys
                     valid_config = {k: v for k, v in user_config.items() if k in self.config}

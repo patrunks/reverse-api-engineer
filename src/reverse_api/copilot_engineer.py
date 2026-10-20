@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from .base_engineer import BaseEngineer
+from .tool_approval import copilot_permission_as_tool_call
 
 # Timeout for waiting on Copilot session completion (10 minutes)
 _SESSION_TIMEOUT = 600
@@ -64,10 +65,19 @@ class CopilotEngineer(BaseEngineer):
 
         return ask_user_question
 
+    async def _handle_permission_request(self, request: Any, _invocation: dict[str, str]) -> Any:
+        """Copilot permission hook: operator approval for risky calls, approve the rest."""
+        from copilot import PermissionRequestResult
+
+        denial = await self._review_tool_call(*copilot_permission_as_tool_call(request))
+        if denial is None:
+            return PermissionRequestResult(kind="approved")
+        return PermissionRequestResult(kind="denied-interactively-by-user", message=denial)
+
     async def analyze_and_generate(self) -> dict[str, Any] | None:
         """Run the reverse engineering analysis with GitHub Copilot."""
         try:
-            from copilot import CopilotClient, PermissionHandler
+            from copilot import CopilotClient
         except ImportError:
             self.ui.error(
                 "GitHub Copilot SDK not installed. From source: uv sync --extra copilot. Installed: pip install 'reverse-api-engineer[copilot]'"
@@ -132,7 +142,7 @@ class CopilotEngineer(BaseEngineer):
                     "streaming": True,
                     "infinite_sessions": {"enabled": True},
                     "tools": [ask_user_tool],
-                    "on_permission_request": PermissionHandler.approve_all,
+                    "on_permission_request": self._handle_permission_request,
                 }
             )
 

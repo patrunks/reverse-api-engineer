@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2 as httpx
@@ -148,8 +149,9 @@ async def test_rejects_model_without_tool_calling():
 
 
 @pytest.mark.asyncio
-async def test_starts_latest_package_without_global_opencode(monkeypatch: pytest.MonkeyPatch):
+async def test_starts_pinned_package_without_global_opencode(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "secret")
+    monkeypatch.setenv("RAE_TOOL_APPROVAL", "ask")
     request = httpx.Request("GET", "http://127.0.0.1:4096/global/health")
     client = AsyncMock()
     client.get = AsyncMock(side_effect=[httpx.ConnectError("refused", request=request), _health_response()])
@@ -171,13 +173,13 @@ async def test_starts_latest_package_without_global_opencode(monkeypatch: pytest
                 )
 
     assert status.started is True
-    assert status.package == "opencode-ai@latest"
+    assert status.package == "opencode-ai@1.18.31"
     assert client.get.await_args_list[0].kwargs == {"timeout": 2.0}
     argv = popen.call_args.args[0]
     assert argv == [
         "/bin/npx",
         "-y",
-        "opencode-ai@latest",
+        "opencode-ai@1.18.31",
         "serve",
         "--hostname",
         "127.0.0.1",
@@ -185,7 +187,10 @@ async def test_starts_latest_package_without_global_opencode(monkeypatch: pytest
         "4096",
     ]
     assert popen.call_args.kwargs["env"]["OPENCODE_SERVER_PASSWORD"] == "secret"
-    assert popen.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"] == "{}"
+    inline_config = json.loads(popen.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert inline_config["permission"]["bash"] == "ask"
+    assert inline_config["permission"]["external_directory"] == "ask"
+    assert inline_config["permission"]["*_browser_run_code"] == "ask"
 
 
 @pytest.mark.asyncio
@@ -305,3 +310,52 @@ def test_windows_shutdown_falls_back_when_taskkill_unavailable():
             opencode_runtime.stop_managed_opencode_server()
     process.terminate.assert_called_once_with()
     process.wait.assert_called_once_with(timeout=3)
+
+
+def test_approval_config_keeps_user_settings_and_puts_ask_rules_last():
+    raw = json.dumps({"provider": {"x": {}}, "permission": {"bash": "allow", "*": "allow", "webfetch": "deny"}})
+    config = json.loads(opencode_runtime.opencode_approval_config(raw))
+    assert config["provider"] == {"x": {}}
+    keys = list(config["permission"])
+    # OpenCode lets the last matching rule win, so a catch-all "*" must not come after "bash".
+    assert keys.index("*") < keys.index("bash")
+    assert config["permission"]["bash"] == "ask"
+    assert config["permission"]["webfetch"] == "deny"
+
+
+def test_approval_config_keeps_stricter_deny():
+    raw = json.dumps({"permission": {"bash": "deny"}})
+    config = json.loads(opencode_runtime.opencode_approval_config(raw))
+    assert config["permission"]["bash"] == "deny"
+
+
+def test_approval_config_expands_string_permission():
+    config = json.loads(opencode_runtime.opencode_approval_config(json.dumps({"permission": "allow"})))
+    assert config["permission"]["*"] == "allow"
+    assert config["permission"]["bash"] == "ask"
+
+
+def test_approval_config_rejects_invalid_json():
+    with pytest.raises(opencode_runtime.OpenCodeSetupError, match="not valid JSON"):
+        opencode_runtime.opencode_approval_config("{nope")
+
+
+@pytest.mark.asyncio
+async def test_auto_approval_leaves_inline_config_untouched(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RAE_TOOL_APPROVAL", "auto")
+    request = httpx.Request("GET", "http://127.0.0.1:4096/global/health")
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[httpx.ConnectError("refused", request=request), _health_response()])
+    process = MagicMock()
+    process.poll.return_value = None
+
+    with patch.object(opencode_runtime, "_config_manager_snapshot", return_value={}):
+        with patch.object(opencode_runtime.shutil, "which", side_effect=lambda name: f"/bin/{name}"):
+            with patch.object(opencode_runtime.subprocess, "Popen", return_value=process) as popen:
+                await opencode_runtime.ensure_opencode_server(
+                    client,
+                    base_url="http://127.0.0.1:4096",
+                    env_overrides={"OPENCODE_CONFIG_CONTENT": "{}"},
+                    timeout=1,
+                )
+    assert popen.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"] == "{}"

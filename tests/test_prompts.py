@@ -229,11 +229,31 @@ class TestAutoTemplates:
             "auto/user_chrome_mcp",
             prompt="browse example.com",
             scripts_dir="/tmp/scripts",
+            browser_profile_note="PROFILE NOTE",
         )
         assert "browse example.com" in text
         assert "navigate_page" in text
         assert "There is no HAR file" in text
-        assert "REAL Chrome browser" in text
+        assert "PROFILE NOTE" in text
+
+    def test_chrome_profile_note_matches_auto_connect(self, monkeypatch):
+        from reverse_api.browser_mcp import chrome_mcp_profile_note
+
+        monkeypatch.setenv("RAE_CHROME_MCP_AUTO_CONNECT", "0")
+        assert "isolated Chrome profile" in chrome_mcp_profile_note(headless=False)
+        monkeypatch.setenv("RAE_CHROME_MCP_AUTO_CONNECT", "1")
+        assert "REAL Chrome browser" in chrome_mcp_profile_note(headless=False)
+        # Auto-connect is impossible headless, so the agent must not be told it has the operator's sessions.
+        assert "isolated Chrome profile" in chrome_mcp_profile_note(headless=True)
+
+    def test_language_partials_keep_secrets_out_of_source(self):
+        from reverse_api.prompts import load_language_partial
+
+        for language in ("python", "javascript", "typescript", "go", "java", "csharp", "php", "ruby", "c", "powershell"):
+            text = load_language_partial(language, scripts_dir="/tmp/s", client_filename="client", run_command="run")
+            assert "/tmp/s/.env" in text, language
+            assert "/tmp/s/.gitignore" in text, language
+            assert "hardcode" not in text.lower(), language
 
 
 class TestFolderNamePrompt:

@@ -25,10 +25,12 @@ from .ollama_runtime import (
 from .opencode_runtime import (
     OpenCodeSetupError,
     ensure_opencode_server,
+    is_managed_server,
     opencode_base_url,
     validate_opencode_model,
 )
 from .opencode_ui import OpenCodeUI
+from .tool_approval import approval_mode
 
 # Enable debug mode with OPENCODE_DEBUG=1
 DEBUG = os.environ.get("OPENCODE_DEBUG", "0") == "1"
@@ -152,6 +154,22 @@ class OpenCodeEngineer(BaseEngineer):
             return httpx.BasicAuth(self.opencode_username, self.opencode_password)
         return None
 
+    async def _review_opencode_permission(self, perm_type: str, properties: dict[str, Any], resources: list[Any]) -> str | None:
+        """Map an OpenCode permission event onto the shared tool review; None means allowed."""
+        if perm_type == "bash":
+            metadata = properties.get("metadata")
+            command = metadata.get("command") if isinstance(metadata, dict) else None
+            # Patterns hold each parsed sub-command; rejoined, a compound command is still reviewed as one.
+            return await self._review_tool_call("Bash", {"command": command or " && ".join(str(r) for r in resources)})
+        if perm_type == "external_directory":
+            for pattern in resources or [""]:
+                directory = str(pattern).rstrip("*").rstrip("/\\") or "/"
+                denial = await self._review_tool_call(perm_type, {"path": directory})
+                if denial is not None:
+                    return denial
+            return None
+        return await self._review_tool_call(perm_type, {})
+
     async def _prepare_server(self, client: httpx.AsyncClient) -> bool:
         """Ensure OpenCode is healthy, starting the managed runtime if needed."""
         try:
@@ -170,6 +188,11 @@ class OpenCodeEngineer(BaseEngineer):
             self.opencode_ui.health_check(server.health)
             if server.version_warning:
                 self.opencode_ui.compatibility_warning(server.version_warning)
+            if approval_mode() == "ask" and not is_managed_server(self.BASE_URL):
+                self.opencode_ui.compatibility_warning(
+                    "This OpenCode server was not started by RAE, so its own permission config decides which shell "
+                    'commands run without asking. Set "permission": {"bash": "ask"} in its config, or stop it and let RAE start OpenCode.'
+                )
             model_id = self.MODEL_MAP.get(self.opencode_model, self.opencode_model)
             await validate_opencode_model(client, self.opencode_provider, model_id)
             return True
@@ -441,7 +464,7 @@ class OpenCodeEngineer(BaseEngineer):
                                 return  # Done!
 
                     elif event_type in {"permission.updated", "permission.asked", "permission.v2.asked"}:
-                        # Auto-approve permissions so the agent can proceed
+                        # Approve once what the review allows, reject the rest
                         permission_id = properties.get("id")
                         perm_session = properties.get("sessionID")
                         is_v2 = event_type == "permission.v2.asked"
@@ -455,23 +478,26 @@ class OpenCodeEngineer(BaseEngineer):
                             # Show permission request in UI
                             self.opencode_ui.permission_requested(perm_type, perm_title)
 
-                            # Auto-approve the permission
-                            # OpenCode expects: "once" | "always" | "reject"
-                            debug_log(f"Auto-approving permission {permission_id}")
+                            # OpenCode expects: "once" | "always" | "reject". Never "always":
+                            # it would let later calls matching the pattern skip review.
+                            denial = await self._review_opencode_permission(perm_type, properties, resources)
+                            reply = "once" if denial is None else "reject"
+                            debug_log(f"Replying {reply} to permission {permission_id}")
                             try:
                                 if is_v2:
                                     perm_response = await client.post(
                                         f"/api/session/{self._session_id}/permission/{permission_id}/reply",
-                                        json={"reply": "always"},
+                                        json={"reply": reply},
                                     )
                                 else:
                                     perm_response = await client.post(
                                         f"/session/{self._session_id}/permissions/{permission_id}",
-                                        json={"response": "always"},  # Legacy OpenCode permission API
+                                        json={"response": reply},  # Legacy OpenCode permission API
                                     )
                                 debug_log(f"Permission response: {perm_response.status_code}")
                                 if 200 <= perm_response.status_code < 300:
-                                    self.opencode_ui.permission_approved(perm_type)
+                                    if denial is None:
+                                        self.opencode_ui.permission_approved(perm_type)
                                 else:
                                     self._last_error = (
                                         f"Permission approval failed for {perm_type}: "

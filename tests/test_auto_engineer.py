@@ -216,12 +216,20 @@ class TestChromeMcpPrompt:
         assert "There is no HAR file" in user_p
         assert "browser_close" not in user_p
 
-    def test_chrome_mcp_prompt_mentions_real_browser(self, tmp_path):
-        """Chrome MCP prompt mentions real Chrome browser."""
+    def test_chrome_mcp_prompt_mentions_real_browser_when_auto_connecting(self, tmp_path, monkeypatch):
+        """Chrome MCP prompt mentions the real Chrome browser only when auto-connect is opted in."""
+        monkeypatch.setenv("RAE_CHROME_MCP_AUTO_CONNECT", "1")
         eng = self._make_engineer(tmp_path)
         sys_p, user_p = eng._build_auto_prompts()
         assert "REAL Chrome browser" in user_p
         assert "existing sessions" in user_p
+
+    def test_chrome_mcp_prompt_describes_isolated_profile_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("RAE_CHROME_MCP_AUTO_CONNECT", raising=False)
+        eng = self._make_engineer(tmp_path)
+        _sys_p, user_p = eng._build_auto_prompts()
+        assert "isolated Chrome profile" in user_p
+        assert "REAL Chrome browser" not in user_p
 
     def test_chrome_mcp_prompt_python(self, tmp_path):
         """Chrome MCP Python prompt includes correct language."""
@@ -286,7 +294,9 @@ class TestAgentBrowserPrompt:
         with self._engineer_with_pkg_mock(tmp_path) as eng:
             _sys_p, user_p = eng._build_auto_prompts()
             assert "skills get core" in user_p
-            assert "AGENT_BROWSER_SESSION" in user_p
+            # Session goes on each command: `export` would need operator approval.
+            assert "--session rae-test123" in user_p
+            assert "export AGENT_BROWSER_SESSION" not in user_p
             assert "npx -y agent-browser@test" in user_p
             assert str(eng.har_path) in user_p
 
@@ -333,16 +343,18 @@ class TestChromeMcpConfig:
         eng = self._make_engineer(tmp_path, agent_provider="chrome-mcp")
         name, config = eng._get_mcp_config()
         assert name == "chrome-devtools"
-        assert "chrome-devtools-mcp@latest" in config["args"]
-        assert "--autoConnect" in config["args"]
+        assert "chrome-devtools-mcp@1.10.1" in config["args"]
+        assert "--isolated" in config["args"]
+        assert "--autoConnect" not in config["args"]
 
     def test_auto_mcp_config(self, tmp_path):
         """Auto provider returns playwright server config."""
         eng = self._make_engineer(tmp_path, agent_provider="auto")
         name, config = eng._get_mcp_config()
         assert name == "playwright"
-        assert "rae-playwright-mcp@latest" in config["args"]
+        assert "rae-playwright-mcp@0.0.8" in config["args"]
         assert "--run-id" in config["args"]
+        assert "--isolated" in config["args"]
 
     def test_agent_browser_no_mcp_config_path(self, tmp_path):
         """`_get_mcp_config` is only for MCP-backed providers."""
@@ -376,14 +388,14 @@ class TestOpenCodeChromeMcpConfig:
         eng = self._make_engineer(tmp_path, agent_provider="chrome-mcp")
         config = eng._get_opencode_mcp_config()
         assert "chrome-devtools" in eng.mcp_name
-        assert "chrome-devtools-mcp@latest" in config["config"]["command"]
+        assert "chrome-devtools-mcp@1.10.1" in config["config"]["command"]
 
     def test_opencode_auto_mcp_config(self, tmp_path):
         """OpenCode auto config uses rae-playwright-mcp."""
         eng = self._make_engineer(tmp_path, agent_provider="auto")
         config = eng._get_opencode_mcp_config()
         assert "playwright" in eng.mcp_name
-        assert "rae-playwright-mcp@latest" in config["config"]["command"]
+        assert "rae-playwright-mcp@0.0.8" in config["config"]["command"]
 
     def test_opencode_agent_browser_skips_mcp(self, tmp_path):
         """CLI-only agent-browser mode does not register OpenCode MCP."""

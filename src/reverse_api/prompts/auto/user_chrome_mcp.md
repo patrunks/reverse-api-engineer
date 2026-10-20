@@ -6,7 +6,7 @@
 {scripts_dir}
 </output_directory>
 
-You are connected to the user's REAL Chrome browser with their existing sessions, cookies, and authentication.
+{browser_profile_note}
 
 ## Workflow
 
@@ -27,8 +27,6 @@ Use Chrome DevTools MCP tools to accomplish the mission goal. Available tools:
 - `evaluate_script` - Execute JavaScript
 - `list_console_messages` - Check console
 
-The user's existing login sessions and cookies are available — you do NOT need to log in where they're already authenticated.
-
 ### Phase 2: MONITOR
 Periodically call `list_network_requests()` to monitor API traffic. Use `get_network_request(reqid)` for full request/response details on important calls. Focus on XHR/fetch requests, auth headers, and response bodies.
 
@@ -39,5 +37,3 @@ There is no HAR file — capture all network data you need using these tools bef
 
 ### Phase 4: REVERSE ENGINEER
 Based on the network data you captured, generate the code. Extract all API calls, authentication patterns, and data structures.
-
-Leverage existing auth from the user's browser sessions when possible.

@@ -1,13 +1,14 @@
 """OpenCode server discovery and managed startup.
 
 Reverse API Engineer reuses an already-running OpenCode server when possible.
-When the configured local server is unavailable, it can start the latest npm
+When the configured local server is unavailable, it can start the pinned npm
 release through ``npx`` and keep that process alive for the current RAE run.
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import re
 import shutil
@@ -23,10 +24,11 @@ from urllib.parse import urlparse
 import httpx2 as httpx
 
 from .runtime_commands import resolve_windows_command
+from .tool_approval import HOST_REACHING_BROWSER_TOOLS, approval_mode
 from .utils import get_config_path
 
 DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096"
-DEFAULT_OPENCODE_PACKAGE = "opencode-ai@latest"
+DEFAULT_OPENCODE_PACKAGE = "opencode-ai@1.18.31"
 TESTED_OPENCODE_VERSION = (1, 18, 4)
 _START_TIMEOUT_SECONDS = 120.0
 
@@ -73,7 +75,7 @@ def opencode_version_warning(health: dict[str, Any]) -> str | None:
         tested = _format_version(TESTED_OPENCODE_VERSION)
         return (
             f"OpenCode v{raw_version} is older than RAE's tested v{tested}; required APIs will be checked before use. "
-            "Stop the existing server to let RAE use opencode-ai@latest."
+            "Stop the existing server to let RAE start its pinned OpenCode package."
         )
     return None
 
@@ -150,7 +152,7 @@ async def get_opencode_model_catalog(client: httpx.AsyncClient) -> dict[str, Any
         raise OpenCodeSetupError(
             f"OpenCode could not provide its model catalog (HTTP {e.response.status_code}). "
             "This server is incompatible because RAE requires /config/providers. "
-            "Stop it so RAE can start opencode-ai@latest."
+            "Stop it so RAE can start its pinned OpenCode package."
         ) from e
     except httpx.RequestError as e:
         raise OpenCodeSetupError(f"Could not read the OpenCode model catalog: {e}") from e
@@ -251,6 +253,42 @@ def _server_address(base_url: str) -> tuple[str, int]:
     return host, port
 
 
+def opencode_approval_config(raw: str | None) -> str:
+    """Merge "ask" rules into inline OpenCode config so risky calls raise permission events.
+
+    OpenCode runs shell commands without asking by default, so they would never
+    reach RAE's review. Keys are re-inserted last because OpenCode lets the last
+    matching rule win; an existing "deny" is kept since it is stricter.
+    """
+
+    try:
+        config = json.loads(raw) if raw and raw.strip() else {}
+    except json.JSONDecodeError as e:
+        raise OpenCodeSetupError(f"OPENCODE_CONFIG_CONTENT is not valid JSON: {e}") from e
+    if not isinstance(config, dict):
+        raise OpenCodeSetupError("OPENCODE_CONFIG_CONTENT must contain a JSON object.")
+
+    permission = config.get("permission")
+    if isinstance(permission, str):
+        permission = {"*": permission}
+    elif not isinstance(permission, dict):
+        permission = {}
+    for key in ("bash", "external_directory", *(f"*_{tool}" for tool in sorted(HOST_REACHING_BROWSER_TOOLS))):
+        if permission.pop(key, None) == "deny":
+            permission[key] = "deny"
+        else:
+            permission[key] = "ask"
+    config["permission"] = permission
+    return json.dumps(config, separators=(",", ":"))
+
+
+def is_managed_server(base_url: str) -> bool:
+    """Whether the OpenCode server at ``base_url`` is the child process RAE started."""
+
+    with _PROCESS_LOCK:
+        return _PROCESS is not None and _PROCESS.poll() is None and _PROCESS_URL == base_url
+
+
 def _start_managed_server(
     base_url: str,
     env_overrides: Mapping[str, str] | None = None,
@@ -283,6 +321,8 @@ def _start_managed_server(
             raise OpenCodeSetupError(str(e)) from e
         child_env = os.environ.copy()
         child_env.update(desired_env)
+        if approval_mode() == "ask":
+            child_env["OPENCODE_CONFIG_CONTENT"] = opencode_approval_config(child_env.get("OPENCODE_CONFIG_CONTENT"))
         try:
             process = subprocess.Popen(
                 argv,

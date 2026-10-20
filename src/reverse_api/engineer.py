@@ -1,6 +1,7 @@
 """Reverse engineering module with SDK dispatch."""
 
 import asyncio
+import functools
 import logging
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     McpSdkServerConfig,
     PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     SdkMcpTool,
     TextBlock,
@@ -22,6 +24,7 @@ from claude_agent_sdk import (
 )
 
 from .base_engineer import REPORT_CLIENT_VERIFIED_INSTRUCTION, BaseEngineer
+from .tool_approval import ClaudeToolGate
 from .utils import build_sdk_env, is_context_overflow_error
 
 # Suppress claude_agent_sdk logs
@@ -38,6 +41,10 @@ class ClaudeEngineer(BaseEngineer):
     # follow-up loop must not offer another turn.
     _context_overflowed = False
 
+    @functools.cached_property
+    def _tool_gate(self) -> ClaudeToolGate:
+        return ClaudeToolGate(self._review_tool_call)
+
     def _print_context_overflow_help(self) -> None:
         """Explain a context-window overflow and how to continue."""
         self.ui.console.print()
@@ -48,8 +55,10 @@ class ClaudeEngineer(BaseEngineer):
         self.ui.console.print("  [dim]it picks up the existing client and HAR from disk. A shorter browsing[/dim]")
         self.ui.console.print("  [dim]session (fewer pages before closing the browser) also keeps the HAR smaller.[/dim]")
 
-    async def _handle_tool_permission(self, tool_name: str, input_data: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow:
-        """Handle tool permission requests, with interactive UI for AskUserQuestion."""
+    async def _handle_tool_permission(
+        self, tool_name: str, input_data: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """Handle tool permission requests: AskUserQuestion UI, operator approval for risky calls."""
         if tool_name == "AskUserQuestion":
             questions = input_data.get("questions", [])
             answers = await self._ask_user_questions(questions)
@@ -57,7 +66,9 @@ class ClaudeEngineer(BaseEngineer):
                 updated_input={"questions": questions, "answers": answers},
             )
 
-        # Auto-approve all other tools
+        denial = await self._tool_gate.permission(tool_name, input_data)
+        if denial is not None:
+            return PermissionResultDeny(message=denial)
         return PermissionResultAllow(updated_input=input_data)
 
     def _build_verification_tool(self) -> SdkMcpTool[dict[str, Any]]:
@@ -285,8 +296,11 @@ class ClaudeEngineer(BaseEngineer):
 
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
-            permission_mode="acceptEdits",
+            # The PreToolUse hook reviews every tool call; "default" stops Claude Code
+            # from approving edits on its own, so can_use_tool backs the hook up.
+            permission_mode="default",
             can_use_tool=self._handle_tool_permission,
+            hooks=self._tool_gate.hooks(),
             cwd=str(self.scripts_dir.parent.parent),
             model=self.model,
             env=build_sdk_env(),

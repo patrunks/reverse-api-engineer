@@ -843,10 +843,19 @@ class TestHeadlessMcpConfig:
                         )
         return eng
 
-    def test_chrome_mcp_headed_uses_autoconnect(self, tmp_path):
+    def test_chrome_mcp_headed_isolates_by_default(self, tmp_path):
+        eng = self._make("chrome-mcp", headless=False, tmp_path=tmp_path)
+        _, cfg = eng._get_mcp_config()
+        assert "--isolated" in cfg["args"]
+        assert "--autoConnect" not in cfg["args"], "attaching to the operator's Chrome must be opt-in"
+        assert "--headless" not in cfg["args"]
+
+    def test_chrome_mcp_headed_autoconnect_when_opted_in(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAE_CHROME_MCP_AUTO_CONNECT", "1")
         eng = self._make("chrome-mcp", headless=False, tmp_path=tmp_path)
         _, cfg = eng._get_mcp_config()
         assert "--autoConnect" in cfg["args"]
+        assert "--isolated" not in cfg["args"]
         assert "--headless" not in cfg["args"]
 
     def test_chrome_mcp_headless_drops_autoconnect_adds_headless(self, tmp_path):

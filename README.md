@@ -29,6 +29,25 @@
 
 ---
 
+## About this fork
+
+This is a security-hardened fork of [kalil0321/reverse-api-engineer](https://github.com/kalil0321/reverse-api-engineer). The agent reads pages it does not control, and any of them can try to inject instructions, so this fork no longer lets it act on your machine unchecked:
+
+| Upstream | This fork |
+| --- | --- |
+| Claude runs with `bypassPermissions`; Copilot and OpenCode auto-approve every tool call | Shell commands, host-reaching browser tools (`browser_run_code`, file uploads, extensions) and any file access outside the run folder wait for your approval. Browsing stays unattended, including single `agent-browser` session commands. Non-interactive runs (`--json`, `--no-interactive`) deny these calls instead of asking. |
+| `npx -y …@latest` for `rae-playwright-mcp`, `chrome-devtools-mcp` and `opencode-ai`; `agent-browser@0` | Exact pins, at least two weeks old when chosen: `rae-playwright-mcp@0.0.8`, `chrome-devtools-mcp@1.10.1`, `opencode-ai@1.18.31`, `agent-browser@0.38.2`. Configs saved with the old floating values are migrated. |
+| Generated clients hardcode captured cookies and tokens in the source | Secrets go to a pre-filled `.env` next to the client, with a `.gitignore` excluding it. The client still runs without setup. |
+| `chrome-mcp` attaches to your own signed-in Chrome (`--autoConnect`); Playwright keeps a persistent profile | Both use a throwaway `--isolated` profile. Attaching to your Chrome is opt-in. |
+
+Settings (env variables take precedence):
+
+- `tool_approval` / `RAE_TOOL_APPROVAL`: `"ask"` (default) or `"auto"` to restore upstream behavior.
+- `chrome_mcp_auto_connect` / `RAE_CHROME_MCP_AUTO_CONNECT`: `false` (default) or `true` to let `chrome-mcp` use your Chrome profile.
+- `playwright_mcp_npx_package` / `RAE_PLAYWRIGHT_MCP_PACKAGE`, `chrome_mcp_npx_package` / `RAE_CHROME_MCP_PACKAGE`: change the pins.
+
+Limits: the Cursor SDK has no per-call permission hook, so `sdk: "cursor"` still runs unreviewed (RAE warns at startup). An OpenCode server you started yourself follows its own permission config; RAE only enforces `"bash": "ask"` on servers it starts. Running the tool in a VM or container remains the strongest protection.
+
 ## How it works
 
 1. You give it a website and a goal ("fetch all Apple jobs").
@@ -95,7 +114,7 @@ Settings live in `~/.reverse-api/config.json` and can be edited via `/settings` 
 ```json
 {
   "agent_provider": "auto",
-  "agent_browser_npx_package": "agent-browser@0",
+  "agent_browser_npx_package": "agent-browser@0.38.2",
   "agent_browser_notes": "",
   "claude_code_model": "claude-sonnet-4-6",
   "collector_model": "claude-sonnet-4-6",
@@ -104,8 +123,12 @@ Settings live in `~/.reverse-api/config.json` and can be edited via `/settings` 
   "opencode_auto_start": true,
   "opencode_base_url": "http://127.0.0.1:4096",
   "opencode_model": "big-pickle",
-  "opencode_npx_package": "opencode-ai@latest",
+  "opencode_npx_package": "opencode-ai@1.18.31",
   "opencode_provider": "opencode",
+  "playwright_mcp_npx_package": "rae-playwright-mcp@0.0.8",
+  "chrome_mcp_npx_package": "chrome-devtools-mcp@1.10.1",
+  "chrome_mcp_auto_connect": false,
+  "tool_approval": "ask",
   "copilot_model": "gpt-5",
   "cursor_model": "composer-2.5",
   "output_dir": null,
@@ -117,7 +140,7 @@ Settings live in `~/.reverse-api/config.json` and can be edited via `/settings` 
 
 - **Models**: Sonnet 4.6 (default), Opus 4.6 (most capable), Haiku 4.5 (fastest). For OpenCode see [models.dev](https://models.dev).
 - **SDK**: `claude` (default), `opencode`, `cursor`, or `copilot` (GitHub Copilot).
-- **OpenCode setup**: with `sdk: "opencode"`, RAE reuses an existing server or downloads/starts `opencode-ai@latest` through `npx`; a global OpenCode installation is not required. Fresh configurations default to the free `opencode/big-pickle` model. `/settings` shows a loading spinner, then offers a searchable **OpenCode Provider / Model** picker populated from the server's connected, tool-capable catalog and marks free OpenCode options. Before creating a session, RAE validates the saved pair again and suggests currently available free models when configuration is invalid. Compatible older servers are reused with a version warning. Node.js 20+ is required for automatic startup. Password-protected servers use `OPENCODE_SERVER_PASSWORD` and optional `OPENCODE_SERVER_USERNAME`. Override startup with `OPENCODE_BASE_URL`, `RAE_OPENCODE_PACKAGE`, or `RAE_OPENCODE_AUTO_START=0`.
+- **OpenCode setup**: with `sdk: "opencode"`, RAE reuses an existing server or downloads/starts the pinned `opencode-ai` release through `npx`; a global OpenCode installation is not required. Fresh configurations default to the free `opencode/big-pickle` model. `/settings` shows a loading spinner, then offers a searchable **OpenCode Provider / Model** picker populated from the server's connected, tool-capable catalog and marks free OpenCode options. Before creating a session, RAE validates the saved pair again and suggests currently available free models when configuration is invalid. Compatible older servers are reused with a version warning. Node.js 20+ is required for automatic startup. Password-protected servers use `OPENCODE_SERVER_PASSWORD` and optional `OPENCODE_SERVER_USERNAME`. Override startup with `OPENCODE_BASE_URL`, `RAE_OPENCODE_PACKAGE`, or `RAE_OPENCODE_AUTO_START=0`.
 - **Ollama through OpenCode**: choose provider `ollama` in `/settings`; RAE starts an installed Ollama daemon if needed, lists only installed models with tool calling and 64k+ context, and supplies OpenCode's provider config inline. Models are never downloaded silently. Override with `RAE_OLLAMA_BASE_URL` or `RAE_OLLAMA_AUTO_START=0`.
 - **Output language**: `python`, `javascript`, `typescript`, `go`, `java`, `csharp`, `php`, `ruby`, `c`, or `powershell`. C needs a POSIX toolchain (`cc`, libcurl headers) — macOS/Linux, or WSL/MSYS2 on Windows. PowerShell needs `pwsh` 7+ (PowerShell Core, not Windows PowerShell 5.1). Its runner executes the generated `Example.ps1` beside `api_client.psm1`; argument overrides are not supported. Edit the example or import the module to call its exported functions with your own arguments.
 
@@ -183,7 +206,8 @@ concise by default, and `--json` / `--json-stream` stdout remains machine-readab
 
 ## Caveats
 
-- Generated code runs locally via Claude Code, so review before executing.
+- Generated code runs locally via Claude Code, so review before executing. Commands the agent wants to run are shown for approval first (see [About this fork](#about-this-fork)).
+- Generated clients read captured credentials from `.env`; keep that file private and never commit it.
 - Sites with aggressive bot detection may block capture or require manual interaction.
 
 ## Development

@@ -84,7 +84,7 @@ def agent_browser_npx_package() -> str:
     if env:
         return env
     cfg = _config_manager_snapshot()
-    return str(cfg.get("agent_browser_npx_package") or "agent-browser@0")
+    return str(cfg.get("agent_browser_npx_package") or "agent-browser@0.38.2")
 
 
 def agent_browser_extra_notes() -> str:

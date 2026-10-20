@@ -18,13 +18,23 @@ Reverse API Engineer prefers an **`agent-browser` binary already on PATH** and v
 Warm up upstream context locally once you start:
 
 ```bash
-export AGENT_BROWSER_SESSION="{agent_browser_session}"
 {agent_browser_shell} skills get core --full
 ```
 
 Treat **`skills get core --full`** as mandatory for default/local flows. Confirm it exits cleanly; if commands error, run **`skills list`** (per upstream), pick the documented bundle (`core` ships with upstream), or escalate with **`{agent_browser_shell} doctor`**.
 
-{agent_browser_headed_hint}### Non-interactive agent-browser shell commands
+{agent_browser_headed_hint}### Operator approval for shell commands
+
+Reverse API Engineer reviews every shell command before it runs. Exactly **one** `{agent_browser_shell} --session {agent_browser_session} <subcommand> …` call per shell invocation runs unattended. Everything else waits for the human operator's approval, and is denied outright in non-interactive runs:
+
+- chaining or shell syntax: `&&`, `;`, pipes, redirects, `$VAR`, `$(…)`, backticks, `export`, inline `VAR=value` prefixes, multi-line scripts;
+- any program other than agent-browser;
+- flags that swap the throwaway session for the operator's browser or files: `--profile`, `--auto-connect`, `--cdp`, `--state`, `--restore`, `--executable-path`, `--extension`, `--init-script`, `--args`, `--allow-file-access`;
+- subcommands `upload`, `download`, `install`, `upgrade`, `auth`, `plugin`, `state`, `chat`.
+
+Avoid them: run one agent-browser command per shell call and read its exit code before the next.
+
+### Non-interactive agent-browser shell commands
 
 The **Bash/terminal** running `agent-browser` is **not** visible to the human operator — only you drive it. Every **`{agent_browser_shell} …`** invocation must be **fully non-interactive**:
 
@@ -38,7 +48,7 @@ Upstream JS dialogs (`alert` / `beforeunload`) are auto-handled by default unles
 
 ### Session + package
 
-- Stable session env: **`AGENT_BROWSER_SESSION={agent_browser_session}`** before every invocation (isolates refs/HAR for this run).
+- Stable session: pass **`--session {agent_browser_session}`** on every invocation (isolates refs/HAR for this run). Do not rely on the `AGENT_BROWSER_SESSION` environment variable: setting it needs `export`, which requires operator approval.
 - Invocation prefix (**exactly how the host resolved the CLI):** **`{agent_browser_shell}`**. Pin for installs is **`{agent_browser_npx_package}`** (config / **`RAE_AGENT_BROWSER_PACKAGE`**).
 
 ### Cloud / remote browsers
@@ -55,13 +65,12 @@ Interaction model identical to upstream docs: **`snapshot`** for `@eN` refs → 
 
 Start HAR recording **before** navigation and confirm it succeeded (abort if this fails — there is no capture without it):
 
+Each line below is a separate shell call. If `network har start` exits non-zero, diagnose with `{agent_browser_shell} doctor` and stop.
+
 ```bash
-export AGENT_BROWSER_SESSION="{agent_browser_session}"
-{agent_browser_shell} network har start
-# verify exit code 0; if non-zero, diagnose with `{agent_browser_shell} doctor` and stop
-{agent_browser_shell} open https://example.com
-{agent_browser_shell} snapshot -i --json
-# … iterate …
+{agent_browser_shell} --session {agent_browser_session} network har start
+{agent_browser_shell} --session {agent_browser_session} open https://example.com
+{agent_browser_shell} --session {agent_browser_session} snapshot -i --json
 ```
 
 
@@ -74,13 +83,12 @@ Use **`network requests --json`** (with filters when noisy) plus occasional snap
 Before reverse engineering MUST flush HAR to the canonical file **exact path** below (create parent dirs if needed):
 
 ```bash
-export AGENT_BROWSER_SESSION="{agent_browser_session}"
-{agent_browser_shell} network har stop {har_path}
-{agent_browser_shell} close
+{agent_browser_shell} --session {agent_browser_session} network har stop {har_path}
+{agent_browser_shell} --session {agent_browser_session} close
 ```
 
 ### Phase 4: REVERSE ENGINEER
 
 Read **`{har_path}`** and emit code under **`{scripts_dir}`** per the system prompt.
 
-**VPS tips:** first-time hosts run `{agent_browser_shell} install` (add `--with-deps` on Linux). `doctor` diagnoses missing Chrome or permissions.
+**VPS tips:** first-time hosts run `{agent_browser_shell} install` (add `--with-deps` on Linux), which needs operator approval. `doctor` diagnoses missing Chrome or permissions.

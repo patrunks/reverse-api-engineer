@@ -1,0 +1,4 @@
+- Store every cookie, token, session ID, API key, and auth header value found in the traffic in `{scripts_dir}/.env`, one `KEY=value` per line, pre-filled with the captured values — never write the secret values into the source code, comments, examples, or README
+- Write `{scripts_dir}/.gitignore` containing `.env` so the secrets are never committed
+- Load the values at startup: a real environment variable with the same name wins, otherwise read the `.env` file located next to the client (resolve it from the client's own file location, not the working directory), using a few lines of built-in parsing rather than an extra dependency
+- If a required value is missing at startup, fail with a clear message naming the missing key

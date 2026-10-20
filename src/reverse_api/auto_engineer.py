@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     PermissionResultAllow,
+    PermissionResultDeny,
     ToolPermissionContext,
 )
 from claude_agent_sdk.types import McpStdioServerConfig
@@ -30,8 +31,17 @@ from .agent_browser import (
     ensure_agent_browser_runtime,
     print_agent_browser_setup_notices,
 )
+from .browser_mcp import (
+    chrome_mcp_args,
+    chrome_mcp_auto_connect,
+    chrome_mcp_package,
+    chrome_mcp_profile_note,
+    playwright_mcp_args,
+    playwright_mcp_package,
+)
 from .engineer import ClaudeEngineer
 from .opencode_engineer import OpenCodeEngineer, debug_log, format_error
+from .tool_approval import REVIEWED_CLAUDE_TOOLS
 from .utils import build_sdk_env, get_har_dir
 
 # Suppress claude_agent_sdk logs
@@ -137,7 +147,9 @@ class ClaudeAutoEngineer(ClaudeEngineer):
             "prompt": self.prompt,
             "scripts_dir": str(self.scripts_dir),
         }
-        if self.agent_provider != "chrome-mcp":
+        if self.agent_provider == "chrome-mcp":
+            template_kwargs["browser_profile_note"] = chrome_mcp_profile_note(self.headless)
+        else:
             template_kwargs["har_path"] = str(self.har_path)
         if self.agent_provider == "agent-browser":
             ab_run_id, ab_headless = _agent_browser_prompt_context(self)
@@ -152,8 +164,10 @@ class ClaudeAutoEngineer(ClaudeEngineer):
         """Return (system_prompt, user_message) based on agent_provider."""
         return self._build_auto_prompts()
 
-    async def _handle_tool_permission(self, tool_name: str, input_data: dict[str, Any], context: ToolPermissionContext) -> PermissionResultAllow:
-        """Handle tool permission requests, with interactive UI for AskUserQuestion."""
+    async def _handle_tool_permission(
+        self, tool_name: str, input_data: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """Handle tool permission requests: AskUserQuestion UI, operator approval for risky calls."""
         if tool_name == "AskUserQuestion":
             if not self.interactive:
                 return PermissionResultAllow(
@@ -167,7 +181,9 @@ class ClaudeAutoEngineer(ClaudeEngineer):
             return PermissionResultAllow(
                 updated_input={"questions": questions, "answers": answers},
             )
-        # Auto-approve all other tools
+        denial = await self._tool_gate.permission(tool_name, input_data)
+        if denial is not None:
+            return PermissionResultDeny(message=denial)
         return PermissionResultAllow(updated_input=input_data)
 
     def _get_mcp_config(self) -> tuple[str, McpStdioServerConfig]:
@@ -182,28 +198,15 @@ class ClaudeAutoEngineer(ClaudeEngineer):
                 "registered browser MCP server (this helper only builds configs for MCP providers)"
             )
         if self.agent_provider == "chrome-mcp":
-            args = ["chrome-devtools-mcp@latest", "--no-usage-statistics"]
-            if self.headless:
-                args.append("--headless")
-            else:
-                args.append("--autoConnect")
             return "chrome-devtools", {
                 "type": "stdio",
                 "command": "npx",
-                "args": args,
+                "args": chrome_mcp_args(self.headless),
             }
-        playwright_args = [
-            "rae-playwright-mcp@latest",
-            "run-mcp-server",
-            "--run-id",
-            self.mcp_run_id,
-        ]
-        if self.headless:
-            playwright_args.append("--headless")
         return "playwright", {
             "type": "stdio",
             "command": "npx",
-            "args": playwright_args,
+            "args": playwright_mcp_args(self.mcp_run_id, self.headless),
         }
 
     async def analyze_and_generate(self) -> dict[str, Any] | None:
@@ -245,12 +248,15 @@ class ClaudeAutoEngineer(ClaudeEngineer):
                 # this is how the SDK namespaces an in-process MCP tool
                 # (matches real chrome-devtools-mcp tool-use blocks, e.g.
                 # "mcp__chrome-devtools__navigate_page").
+                # Pre-allowed tools skip can_use_tool, so shell and file tools
+                # stay off this list and go through operator review instead.
                 allowed_tools=[
-                    *allowed_tools_agent_browser_agent_mode(),
+                    *(t for t in allowed_tools_agent_browser_agent_mode() if t not in REVIEWED_CLAUDE_TOOLS),
                     "mcp__verification__report_client_verified",
                 ],
-                permission_mode="bypassPermissions",
+                permission_mode="default",
                 can_use_tool=self._handle_tool_permission,
+                hooks=self._tool_gate.hooks(),
                 cwd=str(self.scripts_dir.parent.parent),
                 model=self.model,
                 env=build_sdk_env(),
@@ -261,8 +267,9 @@ class ClaudeAutoEngineer(ClaudeEngineer):
             options = ClaudeAgentOptions(
                 system_prompt=system_prompt,
                 mcp_servers={mcp_name: mcp_config, "verification": verification_server},
-                permission_mode="bypassPermissions",
+                permission_mode="default",
                 can_use_tool=self._handle_tool_permission,
+                hooks=self._tool_gate.hooks(),
                 cwd=str(self.scripts_dir.parent.parent),
                 model=self.model,
                 env=build_sdk_env(),
@@ -324,15 +331,18 @@ class ClaudeAutoEngineer(ClaudeEngineer):
                 )
             elif "MCP server" in error_msg or "npx" in error_msg:
                 if self.agent_provider == "chrome-mcp":
-                    self.ui.console.print("\n[dim]Make sure chrome-devtools-mcp is available: npx chrome-devtools-mcp@latest[/dim]")
-                    self.ui.console.print("[dim]Chrome 146+ required with auto-connect enabled at chrome://inspect/#remote-debugging[/dim]")
+                    self.ui.console.print(f"\n[dim]Make sure chrome-devtools-mcp is available: npx {chrome_mcp_package()}[/dim]")
+                    if chrome_mcp_auto_connect():
+                        self.ui.console.print(
+                            "[dim]Chrome 146+ required with auto-connect enabled at chrome://inspect/#remote-debugging[/dim]"
+                        )
                 elif self.agent_provider == "agent-browser":
                     self.ui.console.print(
                         "\n[dim]agent-browser: ensure `agent-browser` is global (`npm install -g`) or pinned "
                         "via agent_browser_npx_package / RAE_AGENT_BROWSER_PACKAGE, and rerun `reverse-api-engineer`.[/dim]"
                     )
                 else:
-                    self.ui.console.print("\n[dim]Make sure rae-playwright-mcp is installed: npm install -g rae-playwright-mcp[/dim]")
+                    self.ui.console.print(f"\n[dim]Make sure rae-playwright-mcp is installed: npm install -g {playwright_mcp_package()}[/dim]")
             else:
                 self.ui.console.print("\n[dim]Make sure Claude Code CLI is installed: npm install -g @anthropic-ai/claude-code[/dim]")
             return None
@@ -378,31 +388,17 @@ class OpenCodeAutoEngineer(OpenCodeEngineer):
             return None
         if self.agent_provider == "chrome-mcp":
             self.mcp_name = f"chrome-devtools-{self._session_id}"
-            cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
-            if self.headless:
-                cmd.append("--headless")
-            else:
-                cmd.append("--autoConnect")
             return {
                 "name": self.mcp_name,
                 "config": {
                     "type": "local",
-                    "command": cmd,
+                    "command": ["npx", "-y", *chrome_mcp_args(self.headless)],
                     "enabled": True,
                     "timeout": 30000,
                 },
             }
         self.mcp_name = f"playwright-{self._session_id}"
-        cmd = [
-            "npx",
-            "-y",
-            "rae-playwright-mcp@latest",
-            "run-mcp-server",
-            "--run-id",
-            self.mcp_run_id,
-        ]
-        if self.headless:
-            cmd.append("--headless")
+        cmd = ["npx", "-y", *playwright_mcp_args(self.mcp_run_id, self.headless)]
         return {
             "name": self.mcp_name,
             "config": {
@@ -623,7 +619,7 @@ class CopilotAutoEngineer:
     async def analyze_and_generate(self) -> dict[str, Any] | None:
         """Run agent mode with Copilot SDK (MCP browsers or agent-browser CLI per provider)."""
         try:
-            from copilot import CopilotClient, PermissionHandler
+            from copilot import CopilotClient
         except ImportError:
             self._engineer.ui.error(
                 "GitHub Copilot SDK not installed. From source: uv sync --extra copilot. Installed: pip install 'reverse-api-engineer[copilot]'"
@@ -686,16 +682,11 @@ class CopilotAutoEngineer:
             await client.start()
 
             if self.agent_provider == "chrome-mcp":
-                chrome_args = ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
-                if self.headless:
-                    chrome_args.append("--headless")
-                else:
-                    chrome_args.append("--autoConnect")
                 mcp_servers_payload: dict[str, Any] = {
                     "chrome-devtools": {
                         "type": "local",
                         "command": "npx",
-                        "args": chrome_args,
+                        "args": ["-y", *chrome_mcp_args(self.headless)],
                         "tools": ["*"],
                         "timeout": 30000,
                     },
@@ -703,20 +694,11 @@ class CopilotAutoEngineer:
             elif self.agent_provider == "agent-browser":
                 mcp_servers_payload = {}
             else:
-                pw_args = [
-                    "-y",
-                    "rae-playwright-mcp@latest",
-                    "run-mcp-server",
-                    "--run-id",
-                    self.mcp_run_id,
-                ]
-                if self.headless:
-                    pw_args.append("--headless")
                 mcp_servers_payload = {
                     "playwright": {
                         "type": "local",
                         "command": "npx",
-                        "args": pw_args,
+                        "args": ["-y", *playwright_mcp_args(self.mcp_run_id, self.headless)],
                         "tools": ["*"],
                         "timeout": 30000,
                     },
@@ -743,7 +725,7 @@ class CopilotAutoEngineer:
                     "streaming": True,
                     "infinite_sessions": {"enabled": True},
                     "mcp_servers": mcp_servers_payload,
-                    "on_permission_request": PermissionHandler.approve_all,
+                    "on_permission_request": eng._handle_permission_request,
                     "hooks": {
                         "on_pre_tool_use": on_pre_tool_use,
                         "on_post_tool_use": on_post_tool_use,
